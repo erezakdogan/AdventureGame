@@ -43,6 +43,11 @@ function RootStack() {
         <Stack.Screen name="run/[id]" options={{ title: 'Analysis' }} />
         <Stack.Screen name="replays/index" options={{ title: 'Strategy replay' }} />
         <Stack.Screen name="replays/[id]" options={{ title: 'Replay' }} />
+        <Stack.Screen name="activity" options={{ title: 'Orders & trades' }} />
+        <Stack.Screen name="track-record" options={{ title: 'Track record' }} />
+        <Stack.Screen name="funds/new" options={{ title: 'New AI fund' }} />
+        <Stack.Screen name="funds/[id]" options={{ title: 'AI fund' }} />
+        <Stack.Screen name="funds/cycle/[id]" options={{ title: 'Trading cycle' }} />
       </Stack.Protected>
       <Stack.Protected guard={!connection}>
         <Stack.Screen name="connect" options={{ headerShown: false }} />

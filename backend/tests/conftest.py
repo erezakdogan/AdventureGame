@@ -25,6 +25,7 @@ class FakeMarket:
     def __init__(self):
         self.prices = {"AAPL": 200.0, "NVDA": 100.0, "BTC-USD": 50_000.0}
         self.closes: dict[str, list[tuple[str, float]]] = {}
+        self.bars: dict[str, list[Bar]] = {}
 
     def quote(self, symbol: str) -> Quote:
         symbol = clean_symbol(symbol)
@@ -39,6 +40,30 @@ class FakeMarket:
 
     def daily_closes(self, symbol, start, end):
         return [(d, c) for d, c in self.closes.get(clean_symbol(symbol), []) if start <= d <= end]
+
+    def bars_between(self, symbol, start, end):
+        return list(self.bars.get(clean_symbol(symbol), []))
+
+    def headlines(self, symbol, limit=3):
+        return [f"{symbol} beats estimates"][:limit]
+
+
+class FakeAllocator:
+    """Stands in for the Claude allocation call: returns queued plans and keeps the prompts."""
+
+    def __init__(self):
+        self.plans: list = []
+        self.prompts: list[str] = []
+
+    def __call__(self, fund, system, prompt):
+        from app.fund import AllocationPlan
+        from app.usage import UsageTracker
+
+        self.prompts.append(prompt)
+        plan = self.plans.pop(0) if len(self.plans) > 1 else self.plans[0]
+        tracker = UsageTracker()
+        tracker.add("claude-opus-5-5", 5000, 800)
+        return AllocationPlan.model_validate(plan), tracker
 
 
 def decision_text(rating: str, target: float | None = 260.0) -> str:
@@ -110,13 +135,20 @@ def market():
 
 
 @pytest.fixture()
-def services(tmp_path, market, monkeypatch):
+def allocator():
+    return FakeAllocator()
+
+
+@pytest.fixture()
+def services(tmp_path, market, allocator, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     FakeGraph.ratings = ["Buy"]
     FakeGraph.seen_portfolios = []
-    s = build_services(tmp_path, market=market, graph_factory=FakeGraph, start_background=False, token=TOKEN)
+    s = build_services(tmp_path, market=market, graph_factory=FakeGraph, start_background=False, token=TOKEN,
+                       allocator=allocator)
     yield s
     s.runs.shutdown()
+    s.funds.shutdown()
     s.db.close()
 
 

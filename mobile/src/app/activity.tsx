@@ -2,12 +2,12 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 
-import { Body, Button, Card, Empty, ErrorBanner, Pill, Row, Screen, Segmented } from '../../components/ui';
-import { api } from '../../lib/api';
-import { price, qty, signedMoney, when } from '../../lib/format';
-import { colors, pnlColor, space } from '../../lib/theme';
-import type { Order, Trade } from '../../lib/types';
-import { useApi } from '../../lib/useApi';
+import { Body, Button, Card, Empty, ErrorBanner, Pill, Row, Screen, Segmented } from '../components/ui';
+import { api } from '../lib/api';
+import { price, qty, signedMoney, when } from '../lib/format';
+import { colors, pnlColor, space } from '../lib/theme';
+import type { Order, Trade } from '../lib/types';
+import { useApi } from '../lib/useApi';
 
 type Tab = 'open' | 'orders' | 'trades';
 

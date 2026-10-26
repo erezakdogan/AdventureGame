@@ -61,6 +61,7 @@ export interface EquityPoint {
   ts: string;
   equity: number;
   cash: number;
+  benchmark?: number | null;
 }
 
 export interface Order {
@@ -153,7 +154,7 @@ export interface Run {
   trade_date: string;
   asset_type: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
-  source: 'manual' | 'autopilot' | 'replay';
+  source: 'manual' | 'autopilot' | 'replay' | 'fund';
   replay_id: number | null;
   auto_execute: boolean;
   options: RunOptions;
@@ -301,4 +302,155 @@ export interface Replay {
   error: string | null;
   created_at: string;
   finished_at: string | null;
+}
+
+export interface Prediction {
+  id: number;
+  created_at: string;
+  source: string;
+  run_id: number | null;
+  fund_id: number | null;
+  cycle_id: number | null;
+  ticker: string;
+  direction: 'up' | 'down' | 'flat';
+  rating: Rating | null;
+  entry_price: number;
+  target_price: number | null;
+  stop_price: number | null;
+  horizon_text: string | null;
+  horizon_hours: number;
+  due_at: string;
+  confidence: number | null;
+  rationale: string | null;
+  status: 'open' | 'scored' | 'no_data';
+  scored_at: string | null;
+  price_at_due: number | null;
+  return_pct: number | null;
+  progress_pct: number | null;
+  accuracy_pct: number | null;
+  peak_progress_pct: number | null;
+  hit_target: number | null;
+  hit_target_at: string | null;
+  hit_stop: number | null;
+  direction_correct: number | null;
+  target_error_pct: number | null;
+  score: number | null;
+  note: string | null;
+  time_left_hours: number;
+  current_price?: number;
+  current_return_pct?: number;
+  current_progress_pct?: number;
+}
+
+export interface PredictionStats {
+  total: number;
+  open: number;
+  scored: number;
+  avg_accuracy_pct: number | null;
+  avg_precision_pct: number | null;
+  target_hit_rate_pct: number | null;
+  direction_rate_pct: number | null;
+  avg_peak_reach_pct: number | null;
+  stop_hit_rate_pct: number | null;
+  avg_return_pct: number | null;
+  by_direction: Record<'up' | 'down' | 'flat', { count: number; avg_accuracy_pct: number | null; direction_rate_pct: number | null }>;
+  recent_accuracy: { id: number; ticker: string; accuracy_pct: number | null; scored_at: string }[];
+}
+
+export type FundStyle = 'hourly' | 'day' | 'swing' | 'position' | 'custom';
+
+export interface FundConfig {
+  style: FundStyle;
+  interval_minutes: number;
+  universe: string[];
+  max_positions: number;
+  max_position_pct: number;
+  cash_reserve_pct: number;
+  model: string;
+  effort: string | null;
+  deep_dive: number;
+  market_hours_only: boolean;
+  flatten_at_close: boolean;
+  use_stop_loss: boolean;
+  use_take_profit: boolean;
+  allow_fractional: boolean;
+  include_news: boolean;
+  instructions: string;
+  benchmark: string | null;
+}
+
+export interface Fund {
+  id: number;
+  name: string;
+  account_id: number;
+  style: FundStyle;
+  style_label: string;
+  config: FundConfig;
+  status: 'active' | 'paused';
+  benchmark_symbol: string | null;
+  benchmark_start: number | null;
+  created_at: string;
+  last_cycle_at: string | null;
+  next_cycle_at: string | null;
+  last_error: string | null;
+  running: boolean;
+  equity: number;
+  cash: number;
+  starting_cash: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  day_pnl: number;
+  realized_pnl: number;
+  commissions_paid: number;
+  trade_count: number;
+  closed_trades: number;
+  win_rate_pct: number | null;
+  max_drawdown_pct: number;
+  benchmark_now: number | null;
+  benchmark_return_pct: number | null;
+  cycles: number;
+  claude_cost_usd: number;
+  accuracy: Partial<PredictionStats>;
+  positions?: Position[];
+  quote_errors?: string[];
+}
+
+export interface FundDecision {
+  ticker: string;
+  action: 'buy' | 'add' | 'hold' | 'trim' | 'sell' | 'avoid';
+  target_weight_pct?: number;
+  expected_price?: number;
+  horizon_hours?: number;
+  stop_loss?: number | null;
+  confidence?: number;
+  rationale?: string;
+  price?: number | null;
+  executed: string;
+  side?: 'buy' | 'sell' | null;
+  quantity?: number | null;
+  fill_price?: number | null;
+  expected_move_pct?: number | null;
+  error?: string;
+}
+
+export interface FundCycle {
+  id: number;
+  fund_id: number;
+  trigger: string;
+  status: 'running' | 'completed' | 'failed' | 'skipped';
+  started_at: string;
+  finished_at: string | null;
+  equity_before: number | null;
+  equity_after: number | null;
+  market_view: string | null;
+  decisions: FundDecision[];
+  orders: Order[];
+  run_ids: number[];
+  usage: RunUsage;
+  error: string | null;
+}
+
+export interface FundCatalog {
+  styles: { id: FundStyle; label: string; interval_minutes: number; horizon_hours: [number, number]; flatten: boolean; brief: string }[];
+  universes: Record<string, string[]>;
 }

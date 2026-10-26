@@ -8,9 +8,15 @@ import type {
   Bar,
   ChatMessage,
   EquityPoint,
+  Fund,
+  FundCatalog,
+  FundConfig,
+  FundCycle,
   ModelInfo,
   Order,
   OrderPlan,
+  Prediction,
+  PredictionStats,
   Preset,
   Quote,
   Replay,
@@ -125,6 +131,13 @@ async function request<T>(
   return data as T;
 }
 
+function query(q: Record<string, string | number | undefined>): string {
+  const parts = Object.entries(q)
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`);
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
 const get = <T>(p: string) => request<T>('GET', p);
 const post = <T>(p: string, b: unknown = {}, timeoutMs?: number) =>
   request<T>('POST', p, b, current, timeoutMs);
@@ -200,6 +213,30 @@ export const api = {
     starting_cash: number;
   }) => post<Replay>('/api/replays', b),
   cancelReplay: (id: number) => post<Replay>(`/api/replays/${id}/cancel`),
+
+  predictions: (q: { source?: string; fund_id?: number; status?: string; run_id?: number; ticker?: string } = {}) =>
+    get<{ predictions: Prediction[] }>(`/api/predictions${query(q)}`),
+  predictionStats: (q: { source?: string; fund_id?: number; ticker?: string } = {}) =>
+    get<PredictionStats>(`/api/predictions/stats${query(q)}`),
+  evaluatePredictions: () => post<{ scored: number }>('/api/predictions/evaluate', {}, 120000),
+
+  fundCatalog: () => get<FundCatalog>('/api/funds/catalog'),
+  funds: () => get<{ funds: Fund[] }>('/api/funds'),
+  fund: (id: number) => get<Fund>(`/api/funds/${id}`),
+  createFund: (b: { name: string; starting_cash: number; run_now: boolean; config: Partial<FundConfig> }) =>
+    post<Fund>('/api/funds', b),
+  updateFund: (id: number, p: Partial<FundConfig> & { name?: string; status?: 'active' | 'paused' }) =>
+    patch<Fund>(`/api/funds/${id}`, p),
+  deleteFund: (id: number) => del<{ ok: boolean }>(`/api/funds/${id}`),
+  runFundCycle: (id: number) => post<{ ok: boolean }>(`/api/funds/${id}/cycle`),
+  depositFund: (id: number, amount: number) => post<Fund>(`/api/funds/${id}/deposit`, { amount }),
+  fundCycles: (id: number) => get<{ cycles: FundCycle[] }>(`/api/funds/${id}/cycles`),
+  fundCycle: (cycleId: number) => get<FundCycle>(`/api/fund-cycles/${cycleId}`),
+  fundEquity: (id: number) =>
+    get<{ points: EquityPoint[]; benchmark_start: number | null; benchmark_symbol: string | null }>(
+      `/api/funds/${id}/equity`,
+    ),
+  fundTrades: (id: number) => get<{ trades: Trade[] }>(`/api/funds/${id}/trades`),
 
   settings: () => get<SettingsResponse>('/api/settings'),
   updateSettings: (p: Partial<Settings> | Record<string, unknown>) => patch<SettingsResponse>('/api/settings', p),

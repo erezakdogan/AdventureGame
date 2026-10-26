@@ -12,7 +12,7 @@ import math
 import threading
 import time
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 
 from tradingagents.dataflows.symbols import crypto_base, normalize_symbol
@@ -67,6 +67,8 @@ class MarketData(Protocol):
     def history(self, symbol: str, period: str = "6mo", interval: str = "1d") -> list[Bar]: ...
 
     def daily_closes(self, symbol: str, start: str, end: str) -> list[tuple[str, float]]: ...
+
+    def bars_between(self, symbol: str, start: datetime, end: datetime) -> list[Bar]: ...
 
 
 _PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "ytd", "max"}
@@ -176,6 +178,66 @@ class YahooMarketData:
             if close is not None:
                 out.append((ts.strftime("%Y-%m-%d"), close))
         return out
+
+    def headlines(self, symbol: str, limit: int = 3) -> list[str]:
+        """Latest news titles for a ticker; empty when Yahoo has none or is unreachable."""
+        try:
+            items = self._ticker(clean_symbol(symbol)).news or []
+        except Exception:
+            return []
+        out = []
+        for item in items:
+            content = item.get("content") if isinstance(item, dict) else None
+            title = (content or item).get("title") if isinstance(content or item, dict) else None
+            date = (content or {}).get("pubDate") or ""
+            if title:
+                out.append(f"{date[:10]} {title}".strip())
+            if len(out) >= limit:
+                break
+        return out
+
+    def bars_between(self, symbol: str, start: datetime, end: datetime) -> list[Bar]:
+        """OHLC bars covering [start, end] at the finest resolution Yahoo keeps for that window."""
+        symbol = clean_symbol(symbol)
+        interval = bar_interval(start, end)
+        if interval == "1d":
+            lo, hi = start.date().isoformat(), (end.date() + timedelta(days=1)).isoformat()
+        else:
+            lo, hi = start - timedelta(minutes=10), end + timedelta(minutes=10)
+        try:
+            df = self._ticker(symbol).history(start=lo, end=hi, interval=interval, auto_adjust=False)
+        except Exception as exc:
+            raise MarketDataError(f"could not fetch history for {symbol}: {exc}") from exc
+        bars = []
+        for ts, row in df.iterrows():
+            close = _finite(row.get("Close"))
+            if close is None:
+                continue
+            bars.append(Bar(
+                t=ts.strftime("%Y-%m-%d") if interval == "1d" else ts.isoformat(),
+                o=_finite(row.get("Open")) or close, h=_finite(row.get("High")) or close,
+                l=_finite(row.get("Low")) or close, c=close, v=_finite(row.get("Volume")) or 0.0,
+            ))
+        return bars
+
+
+def bar_interval(start: datetime, end: datetime, now: datetime | None = None) -> str:
+    """The finest bar size Yahoo serves for this window (5m: last 60 days, 1h: last 730 days)."""
+    now = now or datetime.now(UTC)
+    span, age = end - start, now - start
+    if span <= timedelta(days=2) and age <= timedelta(days=58):
+        return "5m"
+    if span <= timedelta(days=60) and age <= timedelta(days=720):
+        return "1h"
+    return "1d"
+
+
+def bar_time(bar: Bar) -> datetime:
+    """A bar's timestamp as an aware UTC datetime; a daily bar counts as that day's 21:00 UTC close."""
+    if len(bar.t) == 10:
+        return datetime.fromisoformat(bar.t).replace(hour=21, tzinfo=UTC)
+    ts = datetime.fromisoformat(bar.t)
+    return ts.astimezone(UTC) if ts.tzinfo else ts.replace(tzinfo=UTC)
 
 
 def today_iso() -> str:

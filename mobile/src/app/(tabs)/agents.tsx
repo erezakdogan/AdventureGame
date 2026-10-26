@@ -196,6 +196,20 @@ export default function Agents() {
         </Card>
       </Pressable>
 
+      <Pressable onPress={() => router.push({ pathname: '/track-record', params: { title: 'Analyses and funds' } })}>
+        <Card>
+          <Row style={{ justifyContent: 'space-between' }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: colors.text, fontWeight: '700', fontSize: 16 }}>Track record 🎯</Text>
+              <Body muted style={{ fontSize: 13 }}>
+                Every call is recorded with its target and deadline, then scored on what the price really did.
+              </Body>
+            </View>
+            <Text style={{ color: colors.accent, fontSize: 22 }}>›</Text>
+          </Row>
+        </Card>
+      </Pressable>
+
       <ErrorBanner message={runs.error} />
       <Card>
         <Label style={{ marginBottom: space.sm }}>Recent analyses</Label>

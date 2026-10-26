@@ -1,4 +1,5 @@
-"""Background loop: works waiting orders, records the equity curve, and runs autopilot.
+"""Background loop: works waiting orders, records equity curves, scores due forecasts,
+starts AI fund cycles and runs autopilot.
 
 Autopilot is the "trading bot" mode: once a day at your chosen time it has the
 agent team analyse every ticker on its list and, if allowed, trades the result
@@ -15,22 +16,29 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .agents import RunError, RunManager
 from .broker import PaperBroker
+from .fund import FundService
 from .market import MarketDataError
+from .predictions import PredictionService
 from .settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
 TICK_SECONDS = 15
+SCORING_SECONDS = 300
 
 
 class Scheduler:
-    def __init__(self, broker: PaperBroker, runs: RunManager, settings: SettingsStore):
+    def __init__(self, broker: PaperBroker, runs: RunManager, settings: SettingsStore,
+                 predictions: PredictionService | None = None, funds: FundService | None = None):
         self.broker = broker
         self.runs = runs
         self.settings = settings
+        self.predictions = predictions
+        self.funds = funds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_order_check = 0.0
+        self._last_scoring = 0.0
         self.last_autopilot_message: str | None = None
 
     def start(self) -> None:
@@ -52,12 +60,21 @@ class Scheduler:
         if time.monotonic() - self._last_order_check >= settings.order_check_seconds:
             self._last_order_check = time.monotonic()
             try:
-                for order in self.broker.process_open_orders():
+                for order in self.broker.process_open_orders(all_accounts=True):
                     logger.info("filled waiting order %s %s %s", order["id"], order["side"], order["symbol"])
             except MarketDataError as exc:
                 logger.info("order check skipped: %s", exc)
             if self.broker.positions():
                 self.broker.snapshot()
+            if self.funds is not None:
+                self.funds.snapshot_all()
+        if self.predictions is not None and time.monotonic() - self._last_scoring >= SCORING_SECONDS:
+            self._last_scoring = time.monotonic()
+            scored = self.predictions.evaluate_due()
+            if scored:
+                logger.info("scored %d forecasts", scored)
+        if self.funds is not None:
+            self.funds.due(now)
         self.autopilot_due(now)
 
     def autopilot_due(self, now: datetime | None = None) -> list[int]:

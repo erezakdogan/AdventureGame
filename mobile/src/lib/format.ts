@@ -63,3 +63,13 @@ export function daysAgoIso(n: number): string {
   const day = `${d.getDate()}`.padStart(2, '0');
   return `${d.getFullYear()}-${m}-${day}`;
 }
+
+export function whenFuture(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 60000) return 'any moment';
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `in ${m}m`;
+  const h = m / 60;
+  if (h < 36) return `in ${h.toFixed(h < 10 ? 1 : 0)}h`;
+  return `in ${Math.round(h / 24)}d`;
+}

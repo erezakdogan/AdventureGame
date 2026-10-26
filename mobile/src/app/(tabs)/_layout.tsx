@@ -29,7 +29,7 @@ export default function TabsLayout() {
       <Tabs.Screen name="index" options={{ title: 'Portfolio', tabBarIcon: icon('pie-chart-outline') }} />
       <Tabs.Screen name="markets" options={{ title: 'Markets', tabBarIcon: icon('trending-up-outline') }} />
       <Tabs.Screen name="agents" options={{ title: 'Agents', tabBarIcon: icon('people-outline') }} />
-      <Tabs.Screen name="activity" options={{ title: 'Activity', tabBarIcon: icon('receipt-outline') }} />
+      <Tabs.Screen name="funds" options={{ title: 'AI Fund', tabBarIcon: icon('rocket-outline') }} />
       <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarIcon: icon('settings-outline') }} />
     </Tabs>
   );

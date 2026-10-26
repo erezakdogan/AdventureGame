@@ -147,6 +147,7 @@ class RunManager:
         self.market = market
         self.ta_home = ta_home
         self.graph_factory = graph_factory or default_graph_factory
+        self.predictions = None  # PredictionService, wired in by build_services
         self._cancel: dict[int, threading.Event] = {}
         self.executor = ThreadPoolExecutor(max_workers=settings.get().max_concurrent_runs,
                                            thread_name_prefix="agents")
@@ -245,7 +246,7 @@ class RunManager:
             where.append("ticker = ?")
             params.append(clean_symbol(ticker))
         if not include_replays:
-            where.append("source != 'replay'")
+            where.append("source NOT IN ('replay', 'fund')")
         sql = "SELECT * FROM runs" + (" WHERE " + " AND ".join(where) if where else "")
         rows = self.db.query(sql + " ORDER BY id DESC LIMIT ?", (*params, limit))
         return [self._decode(r, full=False) for r in rows]
@@ -265,6 +266,7 @@ class RunManager:
             conn.execute("DELETE FROM run_events WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM chat_messages WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+            conn.execute("DELETE FROM predictions WHERE run_id = ? AND status = 'open'", (run_id,))
 
     def cancel(self, run_id: int) -> dict[str, Any]:
         run = self.get_run(run_id)
@@ -342,14 +344,23 @@ class RunManager:
             pm = parse_decision(decision)
             proposal = {"rating": rating, "trader": trader, "decision": pm,
                         "memory_note": state.get("memory_note") or None}
-            if run["source"] != "replay":
+            if run["source"] not in ("replay", "fund"):
                 proposal["plan"] = self._plan(run["ticker"], rating, trader, pm)
             usage = tracker.summary()
             self._finish(run_id, "completed", rating=rating, decision=decision, proposal=proposal, usage=usage)
+            # A fund's deep-dive analyses feed its own trades, which record their own forecasts.
+            if self.predictions is not None and run["source"] != "fund":
+                try:
+                    pred_id = self.predictions.record_from_run(self.get_run(run_id), proposal)
+                    if pred_id:
+                        self._event(run_id, "Portfolio Manager", "status",
+                                    "Forecast recorded in the track record; it is scored when its horizon ends")
+                except Exception as exc:  # the forecast log must never fail a finished run
+                    logger.warning("could not record prediction for run %s: %s", run_id, exc)
             self._event(run_id, "Portfolio Manager", "decision",
                         f"Final rating: {rating} (≈${usage['cost_usd']:.2f} in Claude usage)")
 
-            if run["auto_execute"] and run["source"] != "replay":
+            if run["auto_execute"] and run["source"] not in ("replay", "fund"):
                 if run["trade_date"] == today_iso():
                     self._auto_execute(run_id)
                 else:

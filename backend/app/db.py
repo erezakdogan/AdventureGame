@@ -15,9 +15,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+SCHEMA_VERSION = 2
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT 'Main',
+    kind TEXT NOT NULL DEFAULT 'main',
     starting_cash REAL NOT NULL,
     cash REAL NOT NULL,
     currency TEXT NOT NULL DEFAULT 'USD',
@@ -25,15 +29,18 @@ CREATE TABLE IF NOT EXISTS account (
 );
 
 CREATE TABLE IF NOT EXISTS positions (
-    symbol TEXT PRIMARY KEY,
+    account_id INTEGER NOT NULL DEFAULT 1,
+    symbol TEXT NOT NULL,
     quantity REAL NOT NULL,
     avg_price REAL NOT NULL,
     opened_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, symbol)
 );
 
 CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL DEFAULT 1,
     symbol TEXT NOT NULL,
     side TEXT NOT NULL,
     quantity REAL NOT NULL,
@@ -52,9 +59,11 @@ CREATE TABLE IF NOT EXISTS orders (
     filled_at TEXT
 );
 CREATE INDEX IF NOT EXISTS orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS orders_account ON orders(account_id, id);
 
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL DEFAULT 1,
     order_id INTEGER NOT NULL,
     symbol TEXT NOT NULL,
     side TEXT NOT NULL,
@@ -67,12 +76,88 @@ CREATE TABLE IF NOT EXISTS trades (
     ts TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS trades_account ON trades(account_id, id);
+
 CREATE TABLE IF NOT EXISTS equity_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL DEFAULT 1,
     ts TEXT NOT NULL,
     equity REAL NOT NULL,
-    cash REAL NOT NULL
+    cash REAL NOT NULL,
+    benchmark REAL
 );
+CREATE INDEX IF NOT EXISTS equity_account ON equity_snapshots(account_id, id);
+
+-- A forecast the bot made: "TICKER goes from entry to target by due_at".
+-- Scored once due_at has passed (see predictions.py).
+CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    run_id INTEGER,
+    fund_id INTEGER,
+    cycle_id INTEGER,
+    ticker TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    rating TEXT,
+    entry_price REAL NOT NULL,
+    target_price REAL,
+    stop_price REAL,
+    horizon_text TEXT,
+    horizon_hours REAL NOT NULL,
+    due_at TEXT NOT NULL,
+    confidence REAL,
+    rationale TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    scored_at TEXT,
+    price_at_due REAL,
+    return_pct REAL,
+    progress_pct REAL,
+    accuracy_pct REAL,
+    peak_progress_pct REAL,
+    hit_target INTEGER,
+    hit_target_at TEXT,
+    hit_stop INTEGER,
+    direction_correct INTEGER,
+    target_error_pct REAL,
+    score REAL,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS predictions_status ON predictions(status, due_at);
+CREATE INDEX IF NOT EXISTS predictions_fund ON predictions(fund_id, id);
+
+CREATE TABLE IF NOT EXISTS funds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    style TEXT NOT NULL,
+    config TEXT NOT NULL,
+    status TEXT NOT NULL,
+    benchmark_symbol TEXT,
+    benchmark_start REAL,
+    created_at TEXT NOT NULL,
+    last_cycle_at TEXT,
+    next_cycle_at TEXT,
+    last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS fund_cycles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fund_id INTEGER NOT NULL,
+    trigger TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    equity_before REAL,
+    equity_after REAL,
+    market_view TEXT,
+    decisions TEXT NOT NULL DEFAULT '[]',
+    orders TEXT NOT NULL DEFAULT '[]',
+    run_ids TEXT NOT NULL DEFAULT '[]',
+    usage TEXT NOT NULL DEFAULT '{}',
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS fund_cycles_fund ON fund_cycles(fund_id, id);
 
 CREATE TABLE IF NOT EXISTS watchlist (
     symbol TEXT PRIMARY KEY,
@@ -168,7 +253,42 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._migrate()
         self._conn.executescript(SCHEMA)
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _columns(self, table: str) -> set[str]:
+        return {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+
+    def _migrate(self) -> None:
+        """Bring a version-1 database (one account) up to the multi-account schema."""
+        if not self._columns("account") or "kind" in self._columns("account"):
+            return  # fresh database, or already migrated
+        c = self._conn
+        c.executescript("""
+            BEGIN;
+            ALTER TABLE account RENAME TO account_v1;
+            CREATE TABLE account (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT 'Main',
+                kind TEXT NOT NULL DEFAULT 'main', starting_cash REAL NOT NULL, cash REAL NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'USD', created_at TEXT NOT NULL);
+            INSERT INTO account(id, starting_cash, cash, currency, created_at)
+                SELECT id, starting_cash, cash, currency, created_at FROM account_v1;
+            DROP TABLE account_v1;
+            ALTER TABLE positions RENAME TO positions_v1;
+            CREATE TABLE positions (
+                account_id INTEGER NOT NULL DEFAULT 1, symbol TEXT NOT NULL, quantity REAL NOT NULL,
+                avg_price REAL NOT NULL, opened_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY (account_id, symbol));
+            INSERT INTO positions(account_id, symbol, quantity, avg_price, opened_at, updated_at)
+                SELECT 1, symbol, quantity, avg_price, opened_at, updated_at FROM positions_v1;
+            DROP TABLE positions_v1;
+            ALTER TABLE orders ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE trades ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE equity_snapshots ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE equity_snapshots ADD COLUMN benchmark REAL;
+            COMMIT;
+        """)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

@@ -25,7 +25,9 @@ from .agents import RunError, RunManager
 from .broker import BrokerError, PaperBroker
 from .chat import ChatService, test_key
 from .db import Database, utcnow
+from .fund import FundError, FundService, style_catalog
 from .market import MarketData, MarketDataError, YahooMarketData, clean_symbol
+from .predictions import PredictionService
 from .replay import MAX_STEPS, ReplayService
 from .scheduler import Scheduler
 from .settings_store import KEY_ENV, SettingsStore
@@ -45,10 +47,12 @@ class Services:
     replays: ReplayService
     scheduler: Scheduler
     token: str
+    predictions: PredictionService
+    funds: FundService
 
 
 def build_services(data_dir: Path | None = None, market: MarketData | None = None, graph_factory=None,
-                   start_background: bool = True, token: str | None = None) -> Services:
+                   start_background: bool = True, token: str | None = None, allocator=None) -> Services:
     data_dir = Path(data_dir) if data_dir else config.DATA_DIR
     data_dir.mkdir(parents=True, exist_ok=True)
     ta_home = data_dir / "tradingagents"
@@ -58,13 +62,17 @@ def build_services(data_dir: Path | None = None, market: MarketData | None = Non
     broker = PaperBroker(db, market, settings)
     runs = RunManager(db, broker, settings, market, ta_home, graph_factory=graph_factory)
     runs.recover()
+    predictions = PredictionService(db, market)
+    runs.predictions = predictions
     replays = ReplayService(db, runs, market, settings, ta_home)
     replays.recover()
-    scheduler = Scheduler(broker, runs, settings)
+    funds = FundService(db, broker, market, settings, runs, predictions, allocator=allocator)
+    funds.recover()
+    scheduler = Scheduler(broker, runs, settings, predictions, funds)
     if start_background:
         scheduler.start()
     return Services(db, settings, market, broker, runs, ChatService(db, runs, settings), replays,
-                    scheduler, token or config.load_access_token())
+                    scheduler, token or config.load_access_token(), predictions, funds)
 
 
 # -- request bodies ---------------------------------------------------------
@@ -116,6 +124,17 @@ class ChatBody(BaseModel):
     question: str
 
 
+class FundBody(BaseModel):
+    name: str = Field(default="AI Fund", max_length=60)
+    starting_cash: float = Field(default=10_000.0, ge=100, le=100_000_000)
+    run_now: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class AmountBody(BaseModel):
+    amount: float = Field(gt=0, le=100_000_000)
+
+
 class ReplayBody(BaseModel):
     ticker: str
     start_date: str
@@ -134,11 +153,13 @@ def create_app(services_factory=build_services) -> FastAPI:
         yield
         services.scheduler.stop()
         services.runs.shutdown()
+        services.funds.shutdown()
 
     app = FastAPI(title="TradingAgents Paper Trader", version=config.APP_VERSION, lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     @app.exception_handler(BrokerError)
+    @app.exception_handler(FundError)
     @app.exception_handler(RunError)
     @app.exception_handler(MarketDataError)
     async def _user_error(_: Request, exc: Exception):
@@ -348,6 +369,91 @@ def create_app(services_factory=build_services) -> FastAPI:
     @app.post("/api/runs/{run_id}/chat")
     async def chat(run_id: int, body: ChatBody, s: Services = S):
         return await run_in_threadpool(s.chat.ask, run_id, body.question)
+
+    # -- track record ------------------------------------------------------
+
+    @app.get("/api/predictions")
+    async def predictions(source: str | None = None, fund_id: int | None = None, ticker: str | None = None,
+                          status: str | None = None, run_id: int | None = None,
+                          limit: int = Query(default=100, le=500), s: Services = S):
+        rows = await run_in_threadpool(lambda: s.predictions.list(source, fund_id, ticker, status, limit,
+                                                                  run_id=run_id))
+        return {"predictions": rows}
+
+    @app.get("/api/predictions/stats")
+    def prediction_stats(source: str | None = None, fund_id: int | None = None, ticker: str | None = None,
+                         s: Services = S):
+        return s.predictions.stats(source, fund_id, ticker)
+
+    @app.post("/api/predictions/evaluate")
+    async def evaluate_predictions(s: Services = S):
+        return {"scored": await run_in_threadpool(s.predictions.evaluate_due)}
+
+    # -- AI funds ------------------------------------------------------------
+
+    @app.get("/api/funds/catalog")
+    def fund_catalog(_: Services = S):
+        return style_catalog()
+
+    @app.get("/api/funds")
+    async def list_funds(s: Services = S):
+        return {"funds": await run_in_threadpool(s.funds.list)}
+
+    @app.post("/api/funds")
+    async def create_fund(body: FundBody, s: Services = S):
+        if body.run_now:
+            s.runs.preflight(s.settings.get())
+        return await run_in_threadpool(s.funds.create, body.name, body.starting_cash, body.config, body.run_now)
+
+    @app.get("/api/funds/{fund_id}")
+    async def get_fund(fund_id: int, s: Services = S):
+        return await run_in_threadpool(s.funds.summary, fund_id)
+
+    @app.patch("/api/funds/{fund_id}")
+    def update_fund(fund_id: int, patch: dict[str, Any], s: Services = S):
+        return s.funds.update(fund_id, patch)
+
+    @app.delete("/api/funds/{fund_id}")
+    def delete_fund(fund_id: int, s: Services = S):
+        s.funds.delete(fund_id)
+        return {"ok": True}
+
+    @app.post("/api/funds/{fund_id}/cycle")
+    def run_fund_cycle(fund_id: int, s: Services = S):
+        s.funds.get(fund_id)
+        s.runs.preflight(s.settings.get())
+        s.funds.run_cycle_async(fund_id, trigger="manual")
+        return {"ok": True}
+
+    @app.post("/api/funds/{fund_id}/deposit")
+    async def deposit(fund_id: int, body: AmountBody, s: Services = S):
+        return await run_in_threadpool(s.funds.deposit, fund_id, body.amount)
+
+    @app.get("/api/funds/{fund_id}/cycles")
+    def fund_cycles(fund_id: int, limit: int = Query(default=30, le=200), s: Services = S):
+        return {"cycles": s.funds.cycles(fund_id, limit)}
+
+    @app.get("/api/fund-cycles/{cycle_id}")
+    def fund_cycle(cycle_id: int, s: Services = S):
+        return s.funds.cycle(cycle_id)
+
+    @app.get("/api/funds/{fund_id}/equity")
+    def fund_equity(fund_id: int, days: int | None = Query(default=None, ge=1, le=3650), s: Services = S):
+        fund = s.funds.get(fund_id)
+        return {"points": s.funds.fund_broker(fund).equity_history(days), "benchmark_start": fund["benchmark_start"],
+                "benchmark_symbol": fund["benchmark_symbol"]}
+
+    @app.get("/api/funds/{fund_id}/trades")
+    def fund_trades(fund_id: int, limit: int = Query(default=200, le=1000), s: Services = S):
+        return {"trades": s.funds.fund_broker(s.funds.get(fund_id)).list_trades(limit)}
+
+    @app.get("/api/funds/{fund_id}/orders")
+    def fund_orders(fund_id: int, status: str | None = None, s: Services = S):
+        return {"orders": s.funds.fund_broker(s.funds.get(fund_id)).list_orders(status)}
+
+    @app.delete("/api/funds/{fund_id}/orders/{order_id}")
+    def cancel_fund_order(fund_id: int, order_id: int, s: Services = S):
+        return s.funds.fund_broker(s.funds.get(fund_id)).cancel_order(order_id)
 
     # -- replays ------------------------------------------------------------
 

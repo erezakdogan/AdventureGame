@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 
 import { LineChart } from '../../components/LineChart';
-import { Body, Card, Empty, ErrorBanner, H1, Label, Loading, Notice, Row, Screen, Segmented } from '../../components/ui';
+import { Body, Button, Card, Empty, ErrorBanner, H1, Label, Loading, Notice, Row, Screen, Segmented } from '../../components/ui';
 import { api } from '../../lib/api';
 import { money, pct, price, qty, signedMoney } from '../../lib/format';
 import { colors, pnlColor, space } from '../../lib/theme';
@@ -74,6 +74,11 @@ export default function Portfolio() {
           <Row style={{ gap: space.md }}>
             <Stat label="Realized P&L" value={signedMoney(a.realized_pnl)} color={pnlColor(a.realized_pnl)} />
             <Stat label="Fees paid" value={money(a.commissions_paid)} />
+          </Row>
+
+          <Row style={{ gap: space.md }}>
+            <Button title="Orders & trades" kind="secondary" style={{ flex: 1 }} onPress={() => router.push('/activity')} />
+            <Button title="Track record 🎯" kind="secondary" style={{ flex: 1 }} onPress={() => router.push('/track-record')} />
           </Row>
 
           {a.quote_errors.length > 0 && (

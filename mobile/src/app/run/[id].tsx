@@ -2,6 +2,7 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Text, View } from 'react-native';
 
+import { PredictionRow } from '../../components/Forecasts';
 import { Markdown } from '../../components/Markdown';
 import { Pipeline } from '../../components/Pipeline';
 import { statusColor } from '../../components/RunRow';
@@ -26,7 +27,7 @@ import {
 import { api } from '../../lib/api';
 import { duration, money, price, qty, todayIso, usd } from '../../lib/format';
 import { colors, ratingColor, space } from '../../lib/theme';
-import type { ChatMessage, Order, OrderPlan, Run, RunEvent } from '../../lib/types';
+import type { ChatMessage, Order, OrderPlan, Prediction, Run, RunEvent } from '../../lib/types';
 
 const SECTIONS: { key: string; label: string }[] = [
   { key: 'final_trade_decision', label: 'Final decision' },
@@ -141,6 +142,7 @@ export default function RunScreen() {
 
       {run.status === 'failed' && <ErrorBanner message={run.error} />}
       {run.status === 'completed' && <Decision run={run} onChange={load} />}
+      {run.status === 'completed' && run.source !== 'fund' && <Forecast runId={runId} />}
 
       <Card>
         <Label style={{ marginBottom: space.md }}>The trading firm</Label>
@@ -268,7 +270,7 @@ function Decision({ run, onChange }: { run: Run; onChange: () => void }) {
       </View>
       {p?.memory_note ? <Body muted style={{ fontSize: 12 }}>{p.memory_note}</Body> : null}
 
-      {run.source !== 'replay' && (
+      {run.source !== 'replay' && run.source !== 'fund' && (
         <>
           <Divider />
           <H2 style={{ marginBottom: 6 }}>Paper order</H2>
@@ -341,6 +343,27 @@ function Decision({ run, onChange }: { run: Run; onChange: () => void }) {
           )}
         </>
       )}
+    </Card>
+  );
+}
+
+function Forecast({ runId }: { runId: number }) {
+  const [pred, setPred] = useState<Prediction | null | undefined>(undefined);
+  useEffect(() => {
+    api
+      .predictions({ run_id: runId })
+      .then((r) => setPred(r.predictions[0] ?? null))
+      .catch(() => setPred(null));
+  }, [runId]);
+  if (!pred) return null;
+  return (
+    <Card>
+      <Label style={{ marginBottom: 4 }}>The forecast being tracked</Label>
+      <Body muted style={{ fontSize: 13 }}>
+        Recorded from the portfolio manager&apos;s call. It is scored against the real price when the horizon ends.
+      </Body>
+      <PredictionRow p={pred} />
+      <Button title="Open the track record" kind="ghost" small onPress={() => router.push('/track-record')} />
     </Card>
   );
 }

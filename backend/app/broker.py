@@ -37,39 +37,82 @@ def _round_qty(qty: float) -> float:
     return math.floor(qty * 1e6 + 1e-6) / 1e6
 
 
+MAIN_ACCOUNT = 1
+
+
+def create_account(db: Database, name: str, starting_cash: float, kind: str = "fund") -> int:
+    """A separate wallet, e.g. for an AI fund; returns its account id."""
+    if not (100 <= starting_cash <= 100_000_000):
+        raise BrokerError("starting cash must be between 100 and 100,000,000")
+    return db.execute(
+        "INSERT INTO account(name, kind, starting_cash, cash, created_at) VALUES(?,?,?,?,?)",
+        (name, kind, starting_cash, starting_cash, utcnow()),
+    )
+
+
+def delete_account(db: Database, account_id: int) -> None:
+    if account_id == MAIN_ACCOUNT:
+        raise BrokerError("the main account cannot be deleted")
+    with db.transaction() as conn:
+        for table in ("positions", "orders", "trades", "equity_snapshots"):
+            conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (account_id,))
+        conn.execute("DELETE FROM account WHERE id = ?", (account_id,))
+
+
 class PaperBroker:
-    def __init__(self, db: Database, market: MarketData, settings: SettingsStore):
+    """One paper account. The main account is id 1; each AI fund has its own."""
+
+    def __init__(self, db: Database, market: MarketData, settings: SettingsStore,
+                 account_id: int = MAIN_ACCOUNT, fractional: bool | None = None):
         self.db = db
         self.market = market
         self.settings = settings
-        if not self.db.query_one("SELECT id FROM account WHERE id = 1"):
+        self.account_id = account_id
+        self.fractional = fractional
+        if account_id == MAIN_ACCOUNT and not self.db.query_one("SELECT id FROM account WHERE id = 1"):
             self.db.execute(
-                "INSERT INTO account(id, starting_cash, cash, created_at) VALUES(1, ?, ?, ?)",
+                "INSERT INTO account(id, name, kind, starting_cash, cash, created_at) "
+                "VALUES(1, 'Main', 'main', ?, ?, ?)",
                 (DEFAULT_STARTING_CASH, DEFAULT_STARTING_CASH, utcnow()),
             )
+
+    def for_account(self, account_id: int, fractional: bool | None = None) -> PaperBroker:
+        return PaperBroker(self.db, self.market, self.settings, account_id, fractional)
 
     # -- account ------------------------------------------------------------
 
     def account(self) -> dict[str, Any]:
-        return self.db.query_one("SELECT * FROM account WHERE id = 1")
+        acct = self.db.query_one("SELECT * FROM account WHERE id = ?", (self.account_id,))
+        if acct is None:
+            raise BrokerError("no such account")
+        return acct
 
     def reset(self, starting_cash: float) -> None:
         if not (100 <= starting_cash <= 100_000_000):
             raise BrokerError("starting cash must be between 100 and 100,000,000")
         with self.db.transaction() as conn:
             for table in ("positions", "orders", "trades", "equity_snapshots"):
-                conn.execute(f"DELETE FROM {table}")
+                conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (self.account_id,))
             conn.execute(
-                "UPDATE account SET starting_cash = ?, cash = ?, created_at = ? WHERE id = 1",
-                (starting_cash, starting_cash, utcnow()),
+                "UPDATE account SET starting_cash = ?, cash = ?, created_at = ? WHERE id = ?",
+                (starting_cash, starting_cash, utcnow(), self.account_id),
             )
         self.snapshot(force=True)
 
+    def deposit(self, amount: float) -> None:
+        """Add paper money. The starting basis grows with it, so P&L is unchanged."""
+        if not (0 < amount <= 100_000_000):
+            raise BrokerError("amount must be between 0 and 100,000,000")
+        self.db.execute("UPDATE account SET cash = cash + ?, starting_cash = starting_cash + ? WHERE id = ?",
+                        (amount, amount, self.account_id))
+        self.snapshot(force=True)
+
     def positions(self) -> list[dict[str, Any]]:
-        return self.db.query("SELECT * FROM positions ORDER BY symbol")
+        return self.db.query("SELECT * FROM positions WHERE account_id = ? ORDER BY symbol", (self.account_id,))
 
     def position(self, symbol: str) -> dict[str, Any] | None:
-        return self.db.query_one("SELECT * FROM positions WHERE symbol = ?", (symbol,))
+        return self.db.query_one("SELECT * FROM positions WHERE account_id = ? AND symbol = ?",
+                                 (self.account_id, symbol))
 
     def summary(self) -> dict[str, Any]:
         """Cash, equity and every position valued at the latest quote."""
@@ -101,8 +144,10 @@ class PaperBroker:
         equity = acct["cash"] + market_value
         for r in rows:
             r["weight_pct"] = r["market_value"] / equity * 100 if equity else 0.0
-        realized = self.db.query_one("SELECT COALESCE(SUM(realized_pnl), 0) AS r FROM trades")["r"]
-        commissions = self.db.query_one("SELECT COALESCE(SUM(commission), 0) AS c FROM trades")["c"]
+        totals = self.db.query_one(
+            "SELECT COALESCE(SUM(realized_pnl), 0) AS r, COALESCE(SUM(commission), 0) AS c, COUNT(*) AS n "
+            "FROM trades WHERE account_id = ?", (self.account_id,))
+        realized, commissions = totals["r"], totals["c"]
         start = acct["starting_cash"]
         return {
             "cash": acct["cash"], "starting_cash": start, "currency": acct["currency"],
@@ -110,6 +155,7 @@ class PaperBroker:
             "total_pnl": equity - start, "total_pnl_pct": (equity - start) / start * 100 if start else 0.0,
             "day_pnl": day_pnl, "realized_pnl": realized, "commissions_paid": commissions,
             "positions": rows, "quote_errors": errors, "created_at": acct["created_at"],
+            "trade_count": totals["n"], "account_id": self.account_id,
         }
 
     def portfolio_context(self) -> PortfolioContext:
@@ -168,9 +214,10 @@ class PaperBroker:
 
         now = utcnow()
         order_id = self.db.execute(
-            "INSERT INTO orders(symbol, side, quantity, order_type, limit_price, stop_price, status, "
-            "source, run_id, note, created_at, updated_at) VALUES(?,?,?,?,?,?, 'open', ?,?,?,?,?)",
-            (symbol, side, quantity, order_type, limit_price, stop_price, source, run_id, note, now, now),
+            "INSERT INTO orders(account_id, symbol, side, quantity, order_type, limit_price, stop_price, status, "
+            "source, run_id, note, created_at, updated_at) VALUES(?,?,?,?,?,?,?, 'open', ?,?,?,?,?)",
+            (self.account_id, symbol, side, quantity, order_type, limit_price, stop_price, source, run_id, note,
+             now, now),
         )
         self._try_fill(order_id, quote.price)
         return self.order(order_id)
@@ -178,7 +225,8 @@ class PaperBroker:
     def _normalize_qty(self, symbol: str, quantity: float | None) -> float:
         if quantity is None or not math.isfinite(quantity) or quantity <= 0:
             raise BrokerError("quantity must be positive")
-        if asset_type_of(symbol) == "stock" and not self.settings.get().allow_fractional:
+        fractional = self.settings.get().allow_fractional if self.fractional is None else self.fractional
+        if asset_type_of(symbol) == "stock" and not fractional:
             quantity = math.floor(quantity + 1e-9)
         else:
             quantity = _round_qty(quantity)
@@ -187,18 +235,22 @@ class PaperBroker:
         return quantity
 
     def order(self, order_id: int) -> dict[str, Any] | None:
-        return self.db.query_one("SELECT * FROM orders WHERE id = ?", (order_id,))
+        return self.db.query_one("SELECT * FROM orders WHERE id = ? AND account_id = ?",
+                                 (order_id, self.account_id))
 
     def list_orders(self, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         if status:
-            return self.db.query("SELECT * FROM orders WHERE status = ? ORDER BY id DESC LIMIT ?", (status, limit))
-        return self.db.query("SELECT * FROM orders ORDER BY id DESC LIMIT ?", (limit,))
+            return self.db.query("SELECT * FROM orders WHERE account_id = ? AND status = ? ORDER BY id DESC LIMIT ?",
+                                 (self.account_id, status, limit))
+        return self.db.query("SELECT * FROM orders WHERE account_id = ? ORDER BY id DESC LIMIT ?",
+                             (self.account_id, limit))
 
     def list_trades(self, limit: int = 200, symbol: str | None = None) -> list[dict[str, Any]]:
         if symbol:
-            return self.db.query("SELECT * FROM trades WHERE symbol = ? ORDER BY id DESC LIMIT ?",
-                                 (clean_symbol(symbol), limit))
-        return self.db.query("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,))
+            return self.db.query("SELECT * FROM trades WHERE account_id = ? AND symbol = ? ORDER BY id DESC LIMIT ?",
+                                 (self.account_id, clean_symbol(symbol), limit))
+        return self.db.query("SELECT * FROM trades WHERE account_id = ? ORDER BY id DESC LIMIT ?",
+                             (self.account_id, limit))
 
     def cancel_order(self, order_id: int, reason: str = "cancelled by user") -> dict[str, Any]:
         order = self.order(order_id)
@@ -212,8 +264,14 @@ class PaperBroker:
         )
         return self.order(order_id)
 
-    def process_open_orders(self) -> list[dict[str, Any]]:
-        """Check every waiting limit/stop order against its latest quote."""
+    def process_open_orders(self, all_accounts: bool = False) -> list[dict[str, Any]]:
+        """Check waiting limit/stop orders (this account's, or every account's) against live quotes."""
+        if all_accounts:
+            rows = self.db.query("SELECT DISTINCT account_id FROM orders WHERE status = 'open'")
+            filled = []
+            for r in rows:
+                filled.extend(self.for_account(r["account_id"]).process_open_orders())
+            return filled
         filled = []
         for order in self.list_orders("open"):
             try:
@@ -237,7 +295,8 @@ class PaperBroker:
         """Fill the order at ``price`` if it is open and triggered. Returns True on a fill."""
         cfg = self.settings.get()
         with self.db.transaction() as conn:
-            order = dict(conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone())
+            order = dict(conn.execute("SELECT * FROM orders WHERE id = ? AND account_id = ?",
+                                      (order_id, self.account_id)).fetchone())
             if order["status"] != "open" or not self._triggered(order, price):
                 return False
 
@@ -249,8 +308,10 @@ class PaperBroker:
             notional = qty * fill
             commission = cfg.commission_per_trade + notional * cfg.commission_bps / 10_000
 
-            cash = conn.execute("SELECT cash FROM account WHERE id = 1").fetchone()["cash"]
-            pos = conn.execute("SELECT * FROM positions WHERE symbol = ?", (symbol,)).fetchone()
+            acct = self.account_id
+            cash = conn.execute("SELECT cash FROM account WHERE id = ?", (acct,)).fetchone()["cash"]
+            pos = conn.execute("SELECT * FROM positions WHERE account_id = ? AND symbol = ?",
+                               (acct, symbol)).fetchone()
             held = pos["quantity"] if pos else 0.0
             now = utcnow()
 
@@ -269,12 +330,12 @@ class PaperBroker:
                 avg = ((held * pos["avg_price"]) if pos else 0.0) + qty * fill
                 avg /= new_qty
                 if pos:
-                    conn.execute("UPDATE positions SET quantity = ?, avg_price = ?, updated_at = ? WHERE symbol = ?",
-                                 (new_qty, avg, now, symbol))
+                    conn.execute("UPDATE positions SET quantity = ?, avg_price = ?, updated_at = ? "
+                                 "WHERE account_id = ? AND symbol = ?", (new_qty, avg, now, acct, symbol))
                 else:
-                    conn.execute("INSERT INTO positions(symbol, quantity, avg_price, opened_at, updated_at) "
-                                 "VALUES(?,?,?,?,?)", (symbol, new_qty, avg, now, now))
-                conn.execute("UPDATE account SET cash = cash - ? WHERE id = 1", (notional + commission,))
+                    conn.execute("INSERT INTO positions(account_id, symbol, quantity, avg_price, opened_at, "
+                                 "updated_at) VALUES(?,?,?,?,?,?)", (acct, symbol, new_qty, avg, now, now))
+                conn.execute("UPDATE account SET cash = cash - ? WHERE id = ?", (notional + commission, acct))
             else:
                 if qty > held + EPS:
                     return reject(f"position is {held:g}, cannot sell {qty:g} (no short selling)")
@@ -282,17 +343,18 @@ class PaperBroker:
                 realized = (fill - pos["avg_price"]) * qty - commission
                 remaining = held - qty
                 if remaining <= 1e-6:
-                    conn.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
+                    conn.execute("DELETE FROM positions WHERE account_id = ? AND symbol = ?", (acct, symbol))
                     # Nothing left to protect: cancel the position's other exit orders.
                     conn.execute(
                         "UPDATE orders SET status = 'cancelled', reject_reason = 'position closed', "
-                        "updated_at = ? WHERE symbol = ? AND side = 'sell' AND status = 'open' AND id != ?",
-                        (now, symbol, order_id),
+                        "updated_at = ? WHERE account_id = ? AND symbol = ? AND side = 'sell' "
+                        "AND status = 'open' AND id != ?",
+                        (now, acct, symbol, order_id),
                     )
                 else:
-                    conn.execute("UPDATE positions SET quantity = ?, updated_at = ? WHERE symbol = ?",
-                                 (remaining, now, symbol))
-                conn.execute("UPDATE account SET cash = cash + ? WHERE id = 1", (qty * fill - commission,))
+                    conn.execute("UPDATE positions SET quantity = ?, updated_at = ? WHERE account_id = ? AND symbol = ?",
+                                 (remaining, now, acct, symbol))
+                conn.execute("UPDATE account SET cash = cash + ? WHERE id = ?", (qty * fill - commission, acct))
 
             conn.execute(
                 "UPDATE orders SET status = 'filled', fill_price = ?, commission = ?, quantity = ?, "
@@ -300,17 +362,19 @@ class PaperBroker:
                 (fill, commission, qty, now, now, order_id),
             )
             conn.execute(
-                "INSERT INTO trades(order_id, symbol, side, quantity, price, commission, realized_pnl, "
-                "source, run_id, ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (order_id, symbol, side, qty, fill, commission, realized, order["source"], order["run_id"], now),
+                "INSERT INTO trades(account_id, order_id, symbol, side, quantity, price, commission, realized_pnl, "
+                "source, run_id, ts) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (acct, order_id, symbol, side, qty, fill, commission, realized, order["source"], order["run_id"],
+                 now),
             )
         self.snapshot(force=True)
         return True
 
     # -- equity curve -------------------------------------------------------
 
-    def snapshot(self, force: bool = False) -> None:
-        last = self.db.query_one("SELECT ts FROM equity_snapshots ORDER BY id DESC LIMIT 1")
+    def snapshot(self, force: bool = False, benchmark: float | None = None) -> None:
+        last = self.db.query_one("SELECT ts FROM equity_snapshots WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                                 (self.account_id,))
         if not force and last and datetime.now(UTC) - datetime.fromisoformat(last["ts"]) < SNAPSHOT_EVERY:
             return
         try:
@@ -318,11 +382,13 @@ class PaperBroker:
         except Exception as exc:  # never let a chart point break a fill
             logger.warning("equity snapshot failed: %s", exc)
             return
-        self.db.execute("INSERT INTO equity_snapshots(ts, equity, cash) VALUES(?,?,?)",
-                        (utcnow(), s["equity"], s["cash"]))
+        self.db.execute("INSERT INTO equity_snapshots(account_id, ts, equity, cash, benchmark) VALUES(?,?,?,?,?)",
+                        (self.account_id, utcnow(), s["equity"], s["cash"], benchmark))
 
     def equity_history(self, days: int | None = None) -> list[dict[str, Any]]:
         if days:
             since = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
-            return self.db.query("SELECT ts, equity, cash FROM equity_snapshots WHERE ts >= ? ORDER BY id", (since,))
-        return self.db.query("SELECT ts, equity, cash FROM equity_snapshots ORDER BY id")
+            return self.db.query("SELECT ts, equity, cash, benchmark FROM equity_snapshots "
+                                 "WHERE account_id = ? AND ts >= ? ORDER BY id", (self.account_id, since))
+        return self.db.query("SELECT ts, equity, cash, benchmark FROM equity_snapshots WHERE account_id = ? "
+                             "ORDER BY id", (self.account_id,))
