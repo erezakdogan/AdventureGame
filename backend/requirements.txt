@@ -1,0 +1,8 @@
+# TradingAgents itself, pinned to the v0.7.0 release this app was built and tested against.
+tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@v0.7.0
+# 1.7.6+ handles structured output on Claude Opus 5.5 / Sonnet 5.5 / Fable 5.1,
+# which reject forced tool choice.
+langchain-anthropic>=1.7.6
+anthropic>=1.17.0
+fastapi>=0.115
+uvicorn[standard]>=0.30

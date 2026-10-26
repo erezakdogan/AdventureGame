@@ -1,0 +1,17 @@
+services:
+  papertrader:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      # Optional: set here or save the key from the app's Settings screen.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Optional: a fixed access token instead of the generated one.
+      PAPERTRADER_TOKEN: ${PAPERTRADER_TOKEN:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+    volumes:
+      - papertrader_data:/data
+    restart: unless-stopped
+
+volumes:
+  papertrader_data:

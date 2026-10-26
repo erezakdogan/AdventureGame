@@ -1,0 +1,16 @@
+[project]
+name = "papertrader-backend"
+version = "1.0.0"
+description = "Paper-trading API that runs TradingAgents on Claude for the mobile app"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "C4", "SIM"]
+ignore = ["E501", "B008"]

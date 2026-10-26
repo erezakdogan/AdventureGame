@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Backend runtime data: database, API keys, access token, TradingAgents caches
+backend/data/
+
+# Local env files
+.env
+.env.*
+
+.DS_Store
